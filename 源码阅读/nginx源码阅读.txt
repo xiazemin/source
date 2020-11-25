@@ -1,0 +1,847 @@
+nginx源码阅读
+
+src/core/nginx.c    main()
+
+ ngx_cycle_t      *cycle, init_cycle;
+
+struct ngx_cycle_s {
+    void                  ****conf_ctx;
+    ngx_pool_t               *pool;
+
+    ngx_log_t                *log;
+    ngx_log_t                 new_log;
+
+    ngx_uint_t                log_use_stderr;  /* unsigned  log_use_stderr:1; */
+
+    ngx_connection_t        **files;
+    ngx_connection_t         *free_connections;
+    ngx_uint_t                free_connection_n;
+
+    ngx_module_t            **modules;
+    ngx_uint_t                modules_n;
+    ngx_uint_t                modules_used;    /* unsigned  modules_used:1; */
+
+    ngx_queue_t               reusable_connections_queue;
+    ngx_uint_t                reusable_connections_n;
+
+    ngx_array_t               listening;
+    ngx_array_t               paths;
+
+    ngx_array_t               config_dump;
+    ngx_rbtree_t              config_dump_rbtree;
+    ngx_rbtree_node_t         config_dump_sentinel;
+
+    ngx_list_t                open_files;
+    ngx_list_t                shared_memory;
+
+    ngx_uint_t                connection_n;
+    ngx_uint_t                files_n;
+
+    ngx_connection_t         *connections;
+    ngx_event_t              *read_events;
+    ngx_event_t              *write_events;
+
+    ngx_cycle_t              *old_cycle;
+
+    ngx_str_t                 conf_file;
+    ngx_str_t                 conf_param;
+    ngx_str_t                 conf_prefix;
+    ngx_str_t                 prefix;
+    ngx_str_t                 lock_file;
+    ngx_str_t                 hostname;
+};
+
+struct ngx_pool_s {
+    ngx_pool_data_t       d;
+    size_t                max;
+    ngx_pool_t           *current;
+    ngx_chain_t          *chain;
+    ngx_pool_large_t     *large;
+    ngx_pool_cleanup_t   *cleanup;
+    ngx_log_t            *log;
+};
+
+参见: struct ngx_cycle_s {
+    /* 保存着所有模块存储配置项的结构体指针，它首先是一个数组，每个数组成员又是一个指针，
+    这个指针指向另一个存储着指针的数组 */
+    void                  ****conf_ctx;
+    //内存池
+    ngx_pool_t               *pool;
+
+    /* 日志模块中提供生成计本ngx_log_t日志对象的功能，这里的log是还没有解析配置前，重定向到屏幕的。
+    在ngx_init_cycle函数执行后，会更需nginx.conf中的配置项重新构造出log */
+    ngx_log_t                *log;
+    /* new_log暂时存储根据nginx.conf生成的新log，之后会赋值给上述log */
+    ngx_log_t                 new_log;
+
+    ngx_uint_t                log_use_stderr;  /* unsigned  log_use_stderr:1; */
+
+    /* 对于poll、rtsig这样的事件模块，会以有效文件句柄来预先建立ngx_connection_t结构体，以加速事件
+    的收集和分发。这时，files就会保存所有ngx_connection_t的指针组成的数组。 */
+    ngx_connection_t        **files;
+    //可用连接池
+    ngx_connection_t         *free_connections;
+    //可用连接池的总数
+    ngx_uint_t                free_connection_n;
+
+    //可以重复使用连接队列
+    ngx_queue_t               reusable_connections_queue;
+
+    //监听端口数组，ngx_listening_t
+    ngx_array_t               listening;
+    //保存着Nginx所有要操作的目录
+    ngx_array_t               paths;
+    //ngx_open_file_t结构体组成的数组，表示Nginx已经打开的所有文件。由模块添加，ngx_init_cycle中打开
+    ngx_list_t                open_files;
+    //ngx_shm_zone_t组成的数组，每个元素表示一块共享内存
+    ngx_list_t                shared_memory;
+
+    //当前进程中所有连接对象的总数
+    ngx_uint_t                connection_n;
+    //上述files中存在的有效文件句柄个数
+    ngx_uint_t                files_n;
+
+    //指向当前进程中的所有连接对象
+    ngx_connection_t         *connections;
+    //指向当前进程中的所有读事件对象
+    ngx_event_t              *read_events;
+    //指向当前进程中所有写事件对象
+    ngx_event_t              *write_events;
+
+    //用于引用上一个ngx_cycle_t对象
+    ngx_cycle_t              *old_cycle;
+
+    //配置文件相对于安装目录的路径名称
+    ngx_str_t                 conf_file;
+    //处理配置文件时需要特殊处理的命令行携带参数
+    ngx_str_t                 conf_param;
+    //配置文件所在目录的路径
+    ngx_str_t                 conf_prefix;
+    //Nginx安装目录的路径
+    ngx_str_t                 prefix;
+    //用于进程间同步文件锁名称
+    ngx_str_t                 lock_file;
+    //gethostname得到的主机名
+}
+
+typedef struct {    //内存池的数据结构模块  
+	u_char               *last;    //当前内存分配结束位置，即下一段可分配内存的起始位置  
+	u_char               *end;     //内存池的结束位置  
+	ngx_pool_t           *next;    //链接到下一个内存池，内存池的很多块内存就是通过该指针连成链表的  
+	ngx_uint_t            failed;  //记录内存分配不能满足需求的失败次数  
+} ngx_pool_data_t;   //结构用来维护内存池的数据块，供用户分配之用。
+
+
+struct ngx_log_s {
+    ngx_uint_t           log_level;
+    ngx_open_file_t     *file;
+
+    ngx_atomic_uint_t    connection;
+
+    time_t               disk_full_time;
+
+    ngx_log_handler_pt   handler;
+    void                *data;
+
+    ngx_log_writer_pt    writer;
+    void                *wdata;
+
+    /*
+     * we declare "action" as "char *" because the actions are usually
+     * the static strings and in the "u_char *" case we have to override
+     * their types all the time
+     */
+
+    char                *action;
+
+    ngx_log_t           *next;
+};
+
+
+struct ngx_connection_s {
+    void               *data;
+    ngx_event_t        *read;
+    ngx_event_t        *write;
+
+    ngx_socket_t        fd;
+
+    ngx_recv_pt         recv;
+    ngx_send_pt         send;
+    ngx_recv_chain_pt   recv_chain;
+    ngx_send_chain_pt   send_chain;
+
+    ngx_listening_t    *listening;
+
+    off_t               sent;
+
+    ngx_log_t          *log;
+
+    ngx_pool_t         *pool;
+
+    int                 type;
+
+    struct sockaddr    *sockaddr;
+    socklen_t           socklen;
+    ngx_str_t           addr_text;
+
+    ngx_str_t           proxy_protocol_addr;
+    in_port_t           proxy_protocol_port;
+
+#if (NGX_SSL || NGX_COMPAT)
+    ngx_ssl_connection_t  *ssl;
+#endif
+
+    ngx_udp_connection_t  *udp;
+
+    struct sockaddr    *local_sockaddr;
+    socklen_t           local_socklen;
+
+    ngx_buf_t          *buffer;
+
+    ngx_queue_t         queue;
+
+    ngx_atomic_uint_t   number;
+
+    ngx_uint_t          requests;
+
+    unsigned            buffered:8;
+
+    unsigned            log_error:3;     /* ngx_connection_log_error_e */
+
+    unsigned            timedout:1;
+    unsigned            error:1;
+    unsigned            destroyed:1;
+
+    unsigned            idle:1;
+    unsigned            reusable:1;
+    unsigned            close:1;
+    unsigned            shared:1;
+
+    unsigned            sendfile:1;
+    unsigned            sndlowat:1;
+    unsigned            tcp_nodelay:2;   /* ngx_connection_tcp_nodelay_e */
+    unsigned            tcp_nopush:2;    /* ngx_connection_tcp_nopush_e */
+
+    unsigned            need_last_buf:1;
+
+#if (NGX_HAVE_AIO_SENDFILE || NGX_COMPAT)
+    unsigned            busy_count:2;
+#endif
+
+#if (NGX_THREADS || NGX_COMPAT)
+    ngx_thread_task_t  *sendfile_task;
+#endif
+};
+
+
+struct ngx_module_s {
+    ngx_uint_t            ctx_index;
+    ngx_uint_t            index;
+
+    char                 *name;
+
+    ngx_uint_t            spare0;
+    ngx_uint_t            spare1;
+
+    ngx_uint_t            version;
+    const char           *signature;
+
+    void                 *ctx;
+    ngx_command_t        *commands;
+    ngx_uint_t            type;
+
+    ngx_int_t           (*init_master)(ngx_log_t *log);
+
+    ngx_int_t           (*init_module)(ngx_cycle_t *cycle);
+
+    ngx_int_t           (*init_process)(ngx_cycle_t *cycle);
+    ngx_int_t           (*init_thread)(ngx_cycle_t *cycle);
+    void                (*exit_thread)(ngx_cycle_t *cycle);
+    void                (*exit_process)(ngx_cycle_t *cycle);
+
+    void                (*exit_master)(ngx_cycle_t *cycle);
+
+    uintptr_t             spare_hook0;
+    uintptr_t             spare_hook1;
+    uintptr_t             spare_hook2;
+    uintptr_t             spare_hook3;
+    uintptr_t             spare_hook4;
+    uintptr_t             spare_hook5;
+    uintptr_t             spare_hook6;
+    uintptr_t             spare_hook7;
+};
+
+struct ngx_queue_s {
+    ngx_queue_t  *prev;
+    ngx_queue_t  *next;
+};
+
+
+struct ngx_event_s {
+    void            *data;
+
+    unsigned         write:1;
+
+    unsigned         accept:1;
+
+    /* used to detect the stale events in kqueue and epoll */
+    unsigned         instance:1;
+
+    /*
+     * the event was passed or would be passed to a kernel;
+     * in aio mode - operation was posted.
+     */
+    unsigned         active:1;
+
+    unsigned         disabled:1;
+
+    /* the ready event; in aio mode 0 means that no operation can be posted */
+    unsigned         ready:1;
+
+    unsigned         oneshot:1;
+
+    /* aio operation is complete */
+    unsigned         complete:1;
+
+    unsigned         eof:1;
+    unsigned         error:1;
+
+    unsigned         timedout:1;
+    unsigned         timer_set:1;
+
+    unsigned         delayed:1;
+
+    unsigned         deferred_accept:1;
+
+    /* the pending eof reported by kqueue, epoll or in aio chain operation */
+    unsigned         pending_eof:1;
+
+    unsigned         posted:1;
+
+    unsigned         closed:1;
+
+    /* to test on worker exit */
+    unsigned         channel:1;
+    unsigned         resolver:1;
+
+    unsigned         cancelable:1;
+
+#if (NGX_HAVE_KQUEUE)
+    unsigned         kq_vnode:1;
+
+    /* the pending errno reported by kqueue */
+    int              kq_errno;
+#endif
+
+    /*
+     * kqueue only:
+     *   accept:     number of sockets that wait to be accepted
+     *   read:       bytes to read when event is ready
+     *               or lowat when event is set with NGX_LOWAT_EVENT flag
+     *   write:      available space in buffer when event is ready
+     *               or lowat when event is set with NGX_LOWAT_EVENT flag
+     *
+     * epoll with EPOLLRDHUP:
+     *   accept:     1 if accept many, 0 otherwise
+     *   read:       1 if there can be data to read, 0 otherwise
+     *
+     * iocp: TODO
+     *
+     * otherwise:
+     *   accept:     1 if accept many, 0 otherwise
+     */
+
+#if (NGX_HAVE_KQUEUE) || (NGX_HAVE_IOCP)
+    int              available;
+#else
+    unsigned         available:1;
+#endif
+
+    ngx_event_handler_pt  handler;
+
+
+#if (NGX_HAVE_IOCP)
+    ngx_event_ovlp_t ovlp;
+#endif
+
+    ngx_uint_t       index;
+
+    ngx_log_t       *log;
+
+    ngx_rbtree_node_t   timer;
+
+    /* the posted queue */
+    ngx_queue_t      queue;
+
+#if 0
+
+    /* the threads support */
+
+    /*
+     * the event thread context, we store it here
+     * if $(CC) does not understand __thread declaration
+     * and pthread_getspecific() is too costly
+     */
+
+    void            *thr_ctx;
+
+#if (NGX_EVENT_T_PADDING)
+
+    /* event should not cross cache line in SMP */
+
+    uint32_t         padding[NGX_EVENT_T_PADDING];
+#endif
+#endif
+};
+
+ ngx_time_init();
+
+ngx_time_update();
+
+ngx_trylock(&ngx_time_lock)
+
+#define ngx_trylock(lock)  (*(lock) == 0 && ngx_atomic_cmp_set(lock, 0, 1))
+#define ngx_unlock(lock)    *(lock) = 0
+
+ ngx_gettimeofday(&tv);
+
+ ngx_gmtime(sec, &gmt);
+
+ngx_unlock(&ngx_time_lock);
+
+ ngx_pid = ngx_getpid();
+    ngx_parent = ngx_getppid();
+
+ init_cycle.pool = ngx_create_pool(1024, log);
+
+  p = ngx_memalign(NGX_POOL_ALIGNMENT, size, log);
+
+ngx_process_options(&init_cycle)
+
+ngx_crc32_table_init()
+
+ngx_add_inherited_sockets(&init_cycle)
+
+ ngx_listening_t  *ls;
+
+
+struct ngx_listening_s {
+    ngx_socket_t        fd;
+
+    struct sockaddr    *sockaddr;
+    socklen_t           socklen;    /* size of sockaddr */
+    size_t              addr_text_max_len;
+    ngx_str_t           addr_text;
+
+    int                 type;
+
+    int                 backlog;
+    int                 rcvbuf;
+    int                 sndbuf;
+#if (NGX_HAVE_KEEPALIVE_TUNABLE)
+    int                 keepidle;
+    int                 keepintvl;
+    int                 keepcnt;
+#endif
+
+    /* handler of accepted connection */
+    ngx_connection_handler_pt   handler;
+
+    void               *servers;  /* array of ngx_http_in_addr_t, for example */
+
+    ngx_log_t           log;
+    ngx_log_t          *logp;
+
+    size_t              pool_size;
+    /* should be here because of the AcceptEx() preread */
+    size_t              post_accept_buffer_size;
+    /* should be here because of the deferred accept */
+    ngx_msec_t          post_accept_timeout;
+
+    ngx_listening_t    *previous;
+    ngx_connection_t   *connection;
+
+    ngx_rbtree_t        rbtree;
+    ngx_rbtree_node_t   sentinel;
+
+    ngx_uint_t          worker;
+
+    unsigned            open:1;
+    unsigned            remain:1;
+    unsigned            ignore:1;
+
+    unsigned            bound:1;       /* already bound */
+    unsigned            inherited:1;   /* inherited from previous process */
+    unsigned            nonblocking_accept:1;
+    unsigned            listen:1;
+    unsigned            nonblocking:1;
+    unsigned            shared:1;    /* shared between threads or processes */
+    unsigned            addr_ntop:1;
+    unsigned            wildcard:1;
+
+#if (NGX_HAVE_INET6)
+    unsigned            ipv6only:1;
+#endif
+    unsigned            reuseport:1;
+    unsigned            add_reuseport:1;
+    unsigned            keepalive:2;
+
+    unsigned            deferred_accept:1;
+    unsigned            delete_deferred:1;
+    unsigned            add_deferred:1;
+#if (NGX_HAVE_DEFERRED_ACCEPT && defined SO_ACCEPTFILTER)
+    char               *accept_filter;
+#endif
+#if (NGX_HAVE_SETFIB)
+    int                 setfib;
+#endif
+
+#if (NGX_HAVE_TCP_FASTOPEN)
+    int                 fastopen;
+#endif
+
+};
+
+inherited = (u_char *) getenv(NGINX_VAR);
+
+ngx_array_init(&cycle->listening, cycle->pool, 10,
+                       sizeof(ngx_listening_t))
+
+ ngx_set_inherited_sockets(cycle);
+
+ ngx_listening_t           *ls;
+
+ for (i = 0; i < cycle->listening.nelts; i++) {
+
+        ls[i].sockaddr = ngx_palloc(cycle->pool, sizeof(ngx_sockaddr_t));
+getsockname(ls[i].fd, ls[i].sockaddr, &ls[i].socklen)
+len = ngx_sock_ntop(ls[i].sockaddr, ls[i].socklen,
+                            ls[i].addr_text.data, len, 1);
+getsockopt(ls[i].fd, SOL_SOCKET, SO_TYPE, (void *) &ls[i].type,
+                       &olen)
+}
+
+ngx_preinit_modules()
+
+  cycle = ngx_init_cycle(&init_cycle);
+
+参见:   cycle = ngx_init_cycle(cycle);
+
+ ngx_pool_t          *pool;
+    ngx_cycle_t         *cycle, **old;
+
+ ngx_timezone_update();
+
+ngx_time_update();
+
+  pool = ngx_create_pool(NGX_CYCLE_POOL_SIZE, log);
+
+ cycle = ngx_pcalloc(pool, sizeof(ngx_cycle_t));
+
+ cycle->old_cycle = old_cycle;
+
+   ngx_rbtree_init(&cycle->config_dump_rbtree, &cycle->config_dump_sentinel,
+                    ngx_str_rbtree_insert_value);
+
+ngx_list_init(&cycle->open_files, pool, n, sizeof(ngx_open_file_t)
+
+ ngx_queue_init(&cycle->reusable_connections_queue);
+
+    if (ngx_process == NGX_PROCESS_SIGNALLER) {
+        return cycle;
+    }
+
+ngx_create_pidfile(&ccf->pid, log)
+
+ngx_open_listening_sockets(cycle)
+
+ ngx_socket_t      s;
+    ngx_listening_t  *ls;
+
+  s = ngx_socket(ls[i].sockaddr->sa_family, ls[i].type, 0);
+
+bind(s, ls[i].sockaddr, ls[i].socklen)
+
+listen(s, ls[i].backlog) 
+
+  ngx_configure_listening_sockets(cycle);
+
+ngx_log_redirect_stderr(cycle)
+
+ngx_init_modules(cycle)
+
+  for (n = 0; /* void */ ; n++) {
+ngx_strncmp(oshm_zone[i].shm.name.data,
+                            shm_zone[n].shm.name.data,
+                            oshm_zone[i].shm.name.len)
+}
+
+  if (ngx_signal) {
+        return ngx_signal_process(cycle, ngx_signal);
+    }
+
+ngx_os_signal_process(cycle, sig, pid);
+
+for (sig = signals; sig->signo != 0; sig++) {
+        if (ngx_strcmp(name, sig->name) == 0) {
+            if (kill(pid, sig->signo) != -1) {
+
+ngx_init_signals(cycle->log)
+
+  for (sig = signals; sig->signo != 0; sig++) {
+
+ngx_signal_handler
+
+sigaction(sig->signo, &sa, NULL) == -1)
+
+ngx_daemon(cycle->log)
+
+    switch (fork()) {
+    case -1:
+        ngx_log_error(NGX_LOG_EMERG, log, ngx_errno, "fork() failed");
+        return NGX_ERROR;
+
+    case 0:
+        break;
+
+    default:
+        exit(0);
+    }
+
+    ngx_parent = ngx_pid;
+    ngx_pid = ngx_getpid();
+
+setsid() 创建会话期
+
+  umask(0)
+
+dup2(fd, STDIN_FILENO)
+dup2(fd, STDOUT_FILENO)
+
+ngx_create_pidfile(&ccf->pid, cycle->log)
+
+ file.fd = ngx_open_file(file.name.data, NGX_FILE_RDWR,
+                            create, NGX_FILE_DEFAULT_ACCESS);
+
+ngx_write_file(&file, pid, len, 0)
+
+ngx_close_file(file.fd)
+
+ngx_log_redirect_stderr(cycle
+
+  if (ngx_process == NGX_PROCESS_SINGLE) {
+        ngx_single_process_cycle(cycle);
+
+    } 
+
+  for ( ;; ) {
+  ngx_process_events_and_timers(cycle);
+ngx_master_process_exit(cycle);
+  cycle = ngx_init_cycle(cycle);
+  ngx_reopen_files(cycle, (ngx_uid_t) -1);
+
+}
+
+  ngx_process_events_and_timers(cycle);
+
+ngx_trylock_accept_mutex(cycle)
+
+ngx_enable_accept_events(cycle)
+
+ngx_add_event(c->read, NGX_READ_EVENT, 0)
+
+typedef struct {
+    ngx_int_t  (*add)(ngx_event_t *ev, ngx_int_t event, ngx_uint_t flags);
+    ngx_int_t  (*del)(ngx_event_t *ev, ngx_int_t event, ngx_uint_t flags);
+
+    ngx_int_t  (*enable)(ngx_event_t *ev, ngx_int_t event, ngx_uint_t flags);
+    ngx_int_t  (*disable)(ngx_event_t *ev, ngx_int_t event, ngx_uint_t flags);
+
+    ngx_int_t  (*add_conn)(ngx_connection_t *c);
+    ngx_int_t  (*del_conn)(ngx_connection_t *c, ngx_uint_t flags);
+
+    ngx_int_t  (*notify)(ngx_event_handler_pt handler);
+
+    ngx_int_t  (*process_events)(ngx_cycle_t *cycle, ngx_msec_t timer,
+                                 ngx_uint_t flags);
+
+    ngx_int_t  (*init)(ngx_cycle_t *cycle, ngx_msec_t timer);
+    void       (*done)(ngx_cycle_t *cycle);
+} ngx_event_actions_t;
+
+ngx_disable_accept_events(cycle, 0)
+
+ (void) ngx_process_events(cycle, timer, flags);
+
+ngx_event_process_posted(cycle, &ngx_posted_accept_events);
+
+ while (!ngx_queue_empty(posted)) {
+  ngx_delete_posted_event(ev);
+}
+
+ ngx_shmtx_unlock(&ngx_accept_mutex);
+
+if (ngx_atomic_cmp_set(mtx->lock, ngx_pid, 0)) {
+        ngx_shmtx_wakeup(mtx);
+    }
+
+ ngx_event_expire_timers();
+
+ ngx_rbtree_delete(&ngx_event_timer_rbtree, &ev->timer);
+
+  ngx_event_process_posted(cycle, &ngx_posted_events);
+
+  while (!ngx_queue_empty(posted)) {
+  ngx_delete_posted_event(ev);
+}
+
+ngx_master_process_exit(cycle);
+
+ ngx_delete_pidfile(cycle);
+
+ ngx_close_listening_sockets(cycle);
+
+  for (i = 0; i < cycle->listening.nelts; i++) {
+
+        c = ls[i].connection;
+
+        if (c) {
+            if (c->read->active) {
+                if (ngx_event_flags & NGX_USE_EPOLL_EVENT) {
+
+                    /*
+                     * it seems that Linux-2.6.x OpenVZ sends events
+                     * for closed shared listening sockets unless
+                     * the events was explicitly deleted
+                     */
+
+                    ngx_del_event(c->read, NGX_READ_EVENT, 0);
+
+                } else {
+                    ngx_del_event(c->read, NGX_READ_EVENT, NGX_CLOSE_EVENT);
+                }
+            }
+
+            ngx_free_connection(c);
+
+            c->fd = (ngx_socket_t) -1;
+        }
+
+    ngx_destroy_pool(cycle->pool);
+
+  cycle = ngx_init_cycle(cycle);
+
+参见:   cycle = ngx_init_cycle(&init_cycle);
+
+  ngx_reopen_files(cycle, (ngx_uid_t) -1);
+
+else {
+        ngx_master_process_cycle(cycle);
+    }
+
+  sigset_t           set;
+
+ sigemptyset(&set);
+
+    sigaddset(&set, SIGCHLD);
+
+sigprocmask(SIG_BLOCK, &set, NULL
+
+ sigemptyset(&set);
+
+ ngx_start_worker_processes(cycle, ccf->worker_processes,
+                               NGX_PROCESS_RESPAWN);
+
+  ngx_channel_t  ch;
+
+ for (i = 0; i < n; i++) {}
+
+  ngx_spawn_process(cycle, ngx_worker_process_cycle,
+                          (void *) (intptr_t) i, "worker process", type);
+
+参见: ngx_spawn_process(cycle, ngx_cache_manager_process_cycle,
+                      &ngx_cache_loader_ctx, "cache loader process",
+                      respawn ? NGX_PROCESS_JUST_SPAWN : NGX_PROCESS_NORESPAWN);
+
+
+socketpair(AF_UNIX, SOCK_STREAM, 0, ngx_processes[s].channel)
+
+ngx_nonblocking(ngx_processes[s].channel[0])
+
+fcntl(ngx_processes[s].channel[0], F_SETOWN, ngx_pid) == -1)
+
+  pid = fork();
+
+    switch (pid) {
+ case 0:
+        ngx_parent = ngx_pid;
+        ngx_pid = ngx_getpid();
+        proc(cycle, data);
+        break;
+
+    default:
+        break;
+    }
+
+ ngx_pass_open_channel(cycle, &ch);
+
+  ngx_write_channel(ngx_processes[i].channel[0],
+                          ch, sizeof(ngx_channel_t), cycle->log);
+
+ n = sendmsg(s, &msg, 0);
+
+ngx_start_cache_manager_processes(cycle, 0);
+
+ ngx_spawn_process(cycle, ngx_cache_manager_process_cycle,
+                      &ngx_cache_manager_ctx, "cache manager process",
+                      respawn ? NGX_PROCESS_JUST_RESPAWN : NGX_PROCESS_RESPAWN);
+
+
+ ngx_pass_open_channel(cycle, &ch);
+
+ngx_spawn_process(cycle, ngx_cache_manager_process_cycle,
+                      &ngx_cache_loader_ctx, "cache loader process",
+                      respawn ? NGX_PROCESS_JUST_SPAWN : NGX_PROCESS_NORESPAWN);
+
+
+参见:   ngx_spawn_process(cycle, ngx_worker_process_cycle,
+                          (void *) (intptr_t) i, "worker process", type);
+
+ for ( ;; ) {}
+
+setitimer(ITIMER_REAL, &itv, NULL)
+
+ sigsuspend(&set);
+
+  ngx_time_update();
+
+ live = ngx_reap_children(cycle);
+
+ngx_spawn_process(cycle, ngx_processes[i].proc,
+                                      ngx_processes[i].data,
+                                      ngx_processes[i].name, i)
+
+  ngx_master_process_exit(cycle);
+
+ ngx_signal_worker_processes(cycle, SIGKILL);
+
+ switch (signo) {
+
+    case ngx_signal_value(NGX_SHUTDOWN_SIGNAL):
+        ch.command = NGX_CMD_QUIT;
+        break;
+
+ngx_write_channel(ngx_processes[i].channel[0],
+                                  &ch, sizeof(ngx_channel_t), cycle->log)
+
+ ngx_signal_worker_processes(cycle, SIGKILL);
+	 switch (signo) {
+
+    case ngx_signal_value(NGX_SHUTDOWN_SIGNAL):
+        ch.command = NGX_CMD_QUIT;
+        break;
+	ngx_write_channel(ngx_processes[i].channel[0],
+                                  &ch, sizeof(ngx_channel_t), cycle->log)
+
+  ngx_signal_worker_processes(cycle,
+                                       ngx_signal_value(NGX_TERMINATE_SIGNAL));
